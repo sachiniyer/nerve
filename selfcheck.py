@@ -46,6 +46,16 @@ EXPECTED = {
 
 MODEL = "claude-haiku-4-5-20251001"
 
+# Binaries the skills depend on. A skill referencing a tool that is not in the
+# image fails at the moment the agent tries to use it — in conversation, in
+# front of the person — with a bare "not found" and no hint that a build
+# dropped it.
+#
+# This list exists because exactly that happened: link-cli was added to a
+# working copy, never committed, and a later rebuild from a clean clone
+# silently removed it. Nothing noticed until someone looked.
+REQUIRED_BINARIES = ["gog", "himalaya", "link-cli", "plann", "git", "gh"]
+
 
 def _get(obj, dotted: str):
     for part in dotted.split("."):
@@ -124,8 +134,16 @@ def check_model() -> list[str]:
     return []
 
 
+def check_binaries() -> list[str]:
+    """Every CLI a skill depends on must be on PATH."""
+    import shutil
+
+    missing = [b for b in REQUIRED_BINARIES if shutil.which(b) is None]
+    return [f"tooling: {b} is not installed (a skill depends on it)" for b in missing]
+
+
 def main() -> int:
-    problems = check_config() + check_model()
+    problems = check_config() + check_binaries() + check_model()
     if problems:
         print("=" * 68, file=sys.stderr)
         print("STARTUP SELF-CHECK FAILED — refusing to start", file=sys.stderr)

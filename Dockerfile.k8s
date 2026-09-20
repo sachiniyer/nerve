@@ -70,6 +70,23 @@ RUN HIMALAYA_VERSION=2.1.0 \
     && chmod +x /usr/local/bin/himalaya \
     && himalaya --version
 
+# link-cli — Stripe's agent wallet. One-time-use virtual cards; the real card
+# is never exposed and every spend needs an approval tap in the Link app.
+# Pinned exactly: this is the one tool here that can move money.
+#
+# NOTE: this was once added to a working copy and never committed, so a later
+# rebuild from a clean clone silently dropped it and the wallet broke with no
+# error anywhere. Use deploy.sh, which refuses to build a dirty tree quietly.
+RUN npm install -g @stripe/link-cli@0.21.0 \
+    && link-cli --version
+
+# plann — CalDAV client for the iCloud calendar shared with Sachin's iPhone.
+# Chosen over khal+vdirsyncer deliberately: plann queries the server directly
+# with no local cache, so the agent cannot answer "what is on today" out of a
+# stale sync. icalendar is for parsing the read-only Proton .ics share link.
+RUN pip install --no-cache-dir --break-system-packages 'plann==1.2.0' 'icalendar>=6.0' \
+    && plann --version
+
 # Node is a runtime dependency, not just a build one: the Claude Agent SDK
 # drives the Claude Code CLI, which is a Node program.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
