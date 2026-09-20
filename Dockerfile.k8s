@@ -100,6 +100,11 @@ RUN uv sync --locked --no-install-project --no-dev
 # ("OSError: Readme file does not exist"). It is copied at this layer rather
 # than with pyproject/uv.lock above so that editing it does not invalidate the
 # dependency layer.
+# Startup self-check. See the module docstring: four separate bugs in one day
+# produced a Running, health-checked, completely broken pod. This fails the
+# rollout instead.
+COPY selfcheck.py /usr/local/bin/selfcheck.py
+
 COPY README.md ./
 COPY nerve/ ./nerve/
 COPY --from=web /web/dist ./web/dist
@@ -127,4 +132,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
 # `init --if-needed` is a no-op once the install is no longer fresh, so this is
 # safe on every restart; it only does work on the first boot of a new PVC
 # (migrations, system.yaml). `exec` so nerve is PID 1 and gets SIGTERM.
-CMD ["sh", "-c", "nerve init --if-needed --non-interactive && exec nerve start -f"]
+CMD ["sh", "-c", "nerve -c \"$NERVE_HOME\" init --if-needed --non-interactive && python3 /usr/local/bin/selfcheck.py && exec nerve -c \"$NERVE_HOME\" start -f"]
