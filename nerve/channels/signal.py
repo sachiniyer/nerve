@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Any, Callable
 
 import httpx
@@ -72,6 +72,11 @@ class SignalChannel(BaseChannel):
         self._client: httpx.AsyncClient | None = None
         # Timestamps of messages we sent, for echo suppression.
         self._sent_timestamps: deque[int] = deque(maxlen=_SENT_MEMORY)
+        # Reacting to a message requires naming its ORIGINAL AUTHOR, not just
+        # the conversation. The router only hands us a message id (a Signal
+        # timestamp), so the author has to be remembered when the message
+        # arrives or the reaction cannot be addressed. Bounded, same as above.
+        self._inbound_authors: OrderedDict[int, str] = OrderedDict()
 
     # ------------------------------------------------------------------ #
     #  Identity                                                            #
@@ -91,6 +96,7 @@ class SignalChannel(BaseChannel):
             | ChannelCapability.MARKDOWN
             | ChannelCapability.SEND_FILES
             | ChannelCapability.TYPING_INDICATOR
+            | ChannelCapability.REACTIONS
         )
 
     @property
@@ -214,6 +220,15 @@ class SignalChannel(BaseChannel):
             logger.warning("signal: ignoring message from non-allowlisted %s", source)
             return
 
+        ts = envelope.get("timestamp")
+        if ts is not None:
+            try:
+                self._inbound_authors[int(ts)] = source
+                while len(self._inbound_authors) > _SENT_MEMORY:
+                    self._inbound_authors.popitem(last=False)
+            except (TypeError, ValueError):
+                pass
+
         logger.info("signal: inbound from %s (%d chars)", source, len(text))
 
         msg = InboundMessage(
@@ -307,6 +322,37 @@ class SignalChannel(BaseChannel):
             )
         except Exception:
             pass
+
+    async def set_reaction(self, target: str, message_id: int, emoji: str) -> None:
+        """React to a message with an emoji.
+
+        Cheap feedback that costs no notification: 👀 on pickup, ✅ on done,
+        rather than sending "working on it" as a whole message.
+
+        ``message_id`` is the Signal timestamp of the message being reacted to.
+        ``target_author`` must be whoever wrote it — looked up from what we saw
+        arrive, falling back to the conversation target, which is correct for
+        Note to Self and the common 1:1 case.
+
+        Best-effort: a failed reaction must never interfere with the real
+        reply, so nothing is raised.
+        """
+        if not self._client:
+            return
+        author = self._inbound_authors.get(int(message_id), target)
+        try:
+            resp = await self._client.post(
+                f"/v1/reactions/{self._cfg().number}",
+                json={
+                    "reaction": emoji,
+                    "recipient": target,
+                    "target_author": author,
+                    "timestamp": int(message_id),
+                },
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            logger.debug("signal: reaction %s on %s failed: %s", emoji, message_id, e)
 
     async def send_file(self, target: str, file_path: str) -> bool:
         import base64
