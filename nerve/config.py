@@ -954,6 +954,49 @@ class AgentConfig:
 
 
 @dataclass
+class SignalConfig:
+    """Signal via a signal-cli-rest-api sidecar.
+
+    Defaults to OFF. Unlike Telegram there is no "open" policy: a Signal
+    message becomes a tool call on this host, so senders are allowlisted or
+    nothing is answered. An empty allowlist rejects everyone — the fail-safe
+    direction is closed, and it is checked per message rather than at startup
+    so a reload cannot silently widen access.
+    """
+
+    enabled: bool = False
+    # The linked account's own number, E.164. This is the account the sidecar
+    # is linked to, not the person being replied to.
+    number: str = ""
+    # Sidecar base URL. Localhost because it is a sidecar in the same pod;
+    # there is no auth on this API, so it must never be exposed.
+    api_url: str = "http://127.0.0.1:8080"
+    # E.164 numbers permitted to talk to the agent.
+    allowed_numbers: list[str] = field(default_factory=list)
+
+    @classmethod
+    @_coerced
+    def from_dict(cls, d: dict) -> SignalConfig:
+        numbers = d.get("allowed_numbers") or []
+        if not isinstance(numbers, list):
+            logger.warning(
+                "signal.allowed_numbers is not a list (%r) — treating as empty, "
+                "which rejects every sender", numbers,
+            )
+            numbers = []
+        enabled = bool(d.get("enabled", False))
+        if enabled and not d.get("number"):
+            logger.warning("signal.enabled is true but signal.number is unset — "
+                           "the channel cannot start")
+        return cls(
+            enabled=enabled,
+            number=str(d.get("number", "")),
+            api_url=str(d.get("api_url", "http://127.0.0.1:8080")),
+            allowed_numbers=[str(n) for n in numbers],
+        )
+
+
+@dataclass
 class TelegramConfig:
     enabled: bool = True
     bot_token: str = ""
@@ -2645,6 +2688,7 @@ class NerveConfig:
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    signal: SignalConfig = field(default_factory=SignalConfig)
     sync: SyncConfig = field(default_factory=SyncConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     cron: CronConfig = field(default_factory=CronConfig)
@@ -2873,6 +2917,7 @@ class NerveConfig:
             gateway=GatewayConfig.from_dict(d.get("gateway", {})),
             agent=AgentConfig.from_dict(d.get("agent", {})),
             telegram=TelegramConfig.from_dict(d.get("telegram", {}), locked=locked),
+            signal=SignalConfig.from_dict(d.get("signal", {})),
             sync=SyncConfig.from_dict(d.get("sync", {})),
             memory=MemoryConfig.from_dict(d.get("memory", {})),
             cron=CronConfig.from_dict(d.get("cron", {}), workspace=workspace, locked=locked),
