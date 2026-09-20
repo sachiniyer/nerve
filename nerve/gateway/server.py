@@ -531,6 +531,18 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error("Hosted channels failed to start: %s", e, exc_info=True)
 
+        # Start Signal channel if enabled
+        signal_channel = None
+        if config.signal.enabled and config.signal.number:
+            from nerve.channels.signal import SignalChannel
+            # get_config, not the object read above: the channel resolves config
+            # per message so a reload reaches the allowlist check.
+            signal_channel = SignalChannel(get_config, _engine.router)
+            _engine.register_channel(signal_channel)
+            await signal_channel.start()
+            startup_cleanups.append(("Signal channel", signal_channel.stop))
+            logger.info("Signal channel started")
+
         # Start cron service
         global _cron_service
         cron_task = None
@@ -901,6 +913,8 @@ async def lifespan(app: FastAPI):
     if telegram_channel:
         await telegram_channel.stop()
     await slack_runtime.shutdown()
+    if signal_channel:
+        await signal_channel.stop()
     if ws_sync_task:
         # Exit through the loop's own stop path rather than cancelling it where
         # it stands: a cycle interrupted between the merge and the reload leaves
