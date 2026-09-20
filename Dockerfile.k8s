@@ -94,6 +94,13 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-install-project --no-dev
 
 # Then the source, then the project itself.
+#
+# README.md is not documentation here, it is a build input: pyproject declares
+# `readme = "README.md"` and hatchling fails the wheel build without it
+# ("OSError: Readme file does not exist"). It is copied at this layer rather
+# than with pyproject/uv.lock above so that editing it does not invalidate the
+# dependency layer.
+COPY README.md ./
 COPY nerve/ ./nerve/
 COPY --from=web /web/dist ./web/dist
 RUN uv sync --locked --no-dev
