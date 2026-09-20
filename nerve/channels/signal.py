@@ -240,7 +240,14 @@ class SignalChannel(BaseChannel):
             metadata={
                 "source_name": envelope.get("sourceName", ""),
                 "source_uuid": envelope.get("sourceUuid", ""),
-                "timestamp": envelope.get("timestamp"),
+                # The router reads "message_id" to enable reactions
+                # (ChannelRouter._message_context). For Signal the message id
+                # IS the envelope timestamp — set both keys: under the name
+                # the router looks for, and under the name that describes what
+                # it is. Declaring the REACTIONS capability without this key
+                # leaves the capability advertised and unusable.
+                "message_id": ts,
+                "timestamp": ts,
             },
         )
         await self.router.handle_message(msg)
