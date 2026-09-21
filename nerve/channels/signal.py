@@ -52,6 +52,12 @@ _MAX_MESSAGE_LENGTH = 4000
 # needed and still bounded.
 _SENT_MEMORY = 256
 
+# Words that mean "stop what you are doing", matched before the router sees
+# them. Kept deliberately short and unambiguous: this has to be typeable
+# one-handed by someone who has just realised the agent is deleting the wrong
+# thing.
+_STOP_WORDS = {"/stop", "stop", "stop!", "halt", "cancel", "abort"}
+
 _RECONNECT_MIN = 1.0
 _RECONNECT_MAX = 60.0
 
@@ -220,6 +226,14 @@ class SignalChannel(BaseChannel):
             logger.warning("signal: ignoring message from non-allowlisted %s", source)
             return
 
+        # Intercept BEFORE the router. A normal message is queued behind the
+        # running turn, so a "stop" sent through the usual path would not be
+        # read until the thing it is trying to stop had already finished —
+        # which makes it useless exactly when it matters.
+        if text.strip().lower() in _STOP_WORDS:
+            await self._handle_stop(source)
+            return
+
         ts = envelope.get("timestamp")
         if ts is not None:
             try:
@@ -251,6 +265,49 @@ class SignalChannel(BaseChannel):
             },
         )
         await self.router.handle_message(msg)
+
+    async def _handle_stop(self, source: str) -> None:
+        """Interrupt the running turn for this conversation.
+
+        This CANCELS in-flight work — it is the escape hatch for "you are
+        deleting the wrong messages", not a way to add a note mid-task. The
+        SDK interrupt ends the turn gracefully and keeps the client alive, so
+        the next message continues the same conversation rather than starting
+        a new one.
+
+        Always replies, including when there was nothing to stop: silence here
+        reads as "the stop did not arrive", which is the worst possible
+        ambiguity in the moment someone sends it.
+        """
+        channel_key = f"signal:{source}"
+        try:
+            session_id = await self.router.engine.sessions.get_last_session(channel_key)
+        except Exception as e:
+            logger.error("signal: could not resolve session for stop: %s", e)
+            session_id = None
+
+        if not session_id:
+            await self.send(OutboundMessage(target=source,
+                                            text="Nothing running to stop."))
+            return
+
+        try:
+            stopped = await self.router.engine.stop_session(session_id)
+        except Exception as e:
+            logger.error("signal: stop_session failed: %s", e, exc_info=True)
+            await self.send(OutboundMessage(
+                target=source,
+                text=f"Could not stop — {type(e).__name__}. "
+                     "If it is still going, scale the deployment to 0."))
+            return
+
+        logger.info("signal: stop requested for session %s -> %s", session_id, stopped)
+        await self.send(OutboundMessage(
+            target=source,
+            text=("Stopped. Whatever was mid-flight is cancelled — anything it "
+                  "already did stands. Tell me what to do next.")
+            if stopped else
+            "Nothing was running. Ready when you are."))
 
     def _extract_text(self, envelope: dict) -> tuple[str, bool]:
         """Pull the message body out of an envelope.
