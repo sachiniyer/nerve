@@ -1607,6 +1607,26 @@ class MemUBridge:
         and numpy work inline, so the service must live where that cannot
         stall the main event loop.
         """
+        # FORK PATCH — do not start memU without a usable credential.
+        #
+        # memU makes raw Anthropic API calls and cannot use the subscription
+        # OAuth token. Upstream starts it anyway and falls back to the literal
+        # string "placeholder" as the key, so every call 401s forever while the
+        # service looks initialized — which is exactly how this deployment ran
+        # for a full day with nothing being remembered and nothing saying so.
+        #
+        # This deployment is subscription-only by requirement, so the honest
+        # state is "off". Memory is served by the workspace `memory` skill and
+        # the raw transcript reader, neither of which needs a credential.
+        if not self.config.effective_api_key:
+            logger.info(
+                "memU disabled: no Anthropic API key, and this deployment is "
+                "subscription-only. Memory is handled by the workspace memory "
+                "skill and the transcripts reader.",
+            )
+            self._available = False
+            return False
+
         self._main_loop = asyncio.get_running_loop()
         self._start_memu_loop()
         return await self._submit(self._initialize_impl())
