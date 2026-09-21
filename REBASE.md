@@ -12,7 +12,7 @@ upstream file is a line that can conflict forever. Adding a new file is free.
 
 ## The delta, and why it barely conflicts
 
-Five commits, ~750 insertions, five files. They split into two very different
+Six commits, ~850 insertions, nine files. They split into two very different
 groups:
 
 ### Group 1 — new files. These can never conflict.
@@ -22,12 +22,14 @@ groups:
 | `nerve/channels/signal.py` | the whole Signal channel |
 | `selfcheck.py` | startup assertion |
 | `Dockerfile.k8s` | k8s image (upstream gitignores plain `Dockerfile`, which is why ours is named differently — do not rename it back) |
+| `web/public/*` | PWA manifest, service worker and icons. Vite copies `public/` into `dist/` verbatim and upstream has no such directory |
 
 Git has nothing to merge against. A rebase carries them across untouched.
 
 ### Group 2 — patches into upstream files. **The only real risk.**
 
-Just **two files, 58 lines total**, all additive:
+Just **three files, ~124 lines**, all additive — and about half of that is
+comment, so the count overstates it.
 
 **`nerve/config.py`** — three insertions:
 1. `class SignalConfig` immediately **before** `class TelegramConfig`
@@ -46,6 +48,20 @@ Every one of them sits next to its Telegram equivalent. **If a rebase
 conflicts, the fix is always the same: find what upstream now does for
 Telegram, and put the Signal line beside it.** You are never reconstructing
 logic, only re-finding an anchor.
+
+**`web/index.html`** — three insertions, making the UI installable as a PWA:
+1. The manifest link, Apple touch icon and web-app meta tags, right after
+   upstream's `<link rel="icon" href="/favicon.ico" />`
+2. A `theme-color` sync script, immediately **after** upstream's pre-paint
+   theme block — it reads the `data-cui-theme` attribute that block sets, so
+   it has to come second
+3. The service-worker registration, right after
+   `<script type="module" src="/src/main.tsx">`
+
+All three are whole blocks appended at the edges of `<head>` and `<body>`,
+which is where upstream is least likely to be editing. If upstream adopts its
+own PWA setup, **delete ours rather than merging the two** — two manifests and
+two service workers is worse than either.
 
 ---
 
@@ -114,5 +130,7 @@ that combination has happened here.
   things that have nothing to do with each other.
 - **Offer the Signal channel upstream.** Issue-worthy: it is self-contained and
   generally useful. The best outcome is deleting this fork.
-- If the delta ever grows past ~100 lines in upstream files, that is the signal
-  something belongs elsewhere.
+- If the *logic* in upstream files ever grows past ~100 lines, that is the
+  signal something belongs elsewhere. Comments do not count — they do not
+  conflict any harder than the line they explain, and this repo would rather
+  have them.
