@@ -973,6 +973,14 @@ class SignalConfig:
     api_url: str = "http://127.0.0.1:8080"
     # E.164 numbers permitted to talk to the agent.
     allowed_numbers: list[str] = field(default_factory=list)
+    # E.164 numbers the agent may SEND to, beyond the account's own number.
+    #
+    # Separate from allowed_numbers on purpose, and empty by default: reading
+    # a conversation and being able to write into it are different powers, and
+    # conflating them is how an agent ends up texting someone's partner. Note
+    # to Self always works without being listed. Adding a number here IS the
+    # approval step — it is a deliberate config change, reviewed in git.
+    outbound_allowed_numbers: list[str] = field(default_factory=list)
 
     @classmethod
     @_coerced
@@ -993,6 +1001,10 @@ class SignalConfig:
             number=str(d.get("number", "")),
             api_url=str(d.get("api_url", "http://127.0.0.1:8080")),
             allowed_numbers=[str(n) for n in numbers],
+            outbound_allowed_numbers=[
+                str(n) for n in (d.get("outbound_allowed_numbers") or [])
+                if str(n).strip()
+            ],
         )
 
 
