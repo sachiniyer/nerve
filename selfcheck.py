@@ -197,9 +197,51 @@ def check_claude_config_dir() -> list[str]:
     return []
 
 
+def check_subscription_only() -> list[str]:
+    """Inference must run on the subscription, never on an API key.
+
+    This is a money check, not a style one. nerve's _build_env injects
+    config.effective_api_key into the spawned Claude Code CLI as
+    ANTHROPIC_API_KEY, and the CLI prefers that over CLAUDE_CODE_OAUTH_TOKEN.
+    So an api key set anywhere config can see it — including
+    `anthropic_api_key` in the workspace settings.yaml, which was set for
+    memU — silently moves EVERY agent turn onto pay-per-token billing.
+
+    It did exactly that here: $15 of credits in a day, no error, no log line,
+    and the container's own environment looked clean because the key only
+    appears in the child process. The fork now refuses the injection, and this
+    fails the rollout if the configuration that caused it ever comes back.
+    """
+    problems = []
+    if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        problems.append(
+            "billing: CLAUDE_CODE_OAUTH_TOKEN is not set — the subscription "
+            "is the only permitted inference path on this deployment"
+        )
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        problems.append(
+            "billing: ANTHROPIC_API_KEY is set in the environment; the CLI "
+            "prefers it over the subscription token and every turn would be "
+            "billed per-token"
+        )
+    try:
+        from nerve.config import get_config
+
+        if (get_config().effective_api_key or "").strip():
+            problems.append(
+                "billing: an anthropic_api_key is configured; nerve injects it "
+                "into the agent subprocess, which moves the whole agent off "
+                "the subscription onto per-token billing"
+            )
+    except Exception as e:
+        problems.append(f"billing: could not read the api key config: {e}")
+    return problems
+
+
 def main() -> int:
     problems = (
         check_config()
+        + check_subscription_only()
         + check_binaries()
         + check_persistence()
         + check_claude_config_dir()
