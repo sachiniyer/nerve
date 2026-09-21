@@ -716,6 +716,30 @@ class ClaudeBackend:
                 env["AWS_SECRET_ACCESS_KEY"] = config.provider.aws_secret_access_key
         else:
             api_key = config.effective_api_key
+            # FORK PATCH — subscription-only inference is a hard requirement.
+            #
+            # Upstream injects config.effective_api_key here as
+            # ANTHROPIC_API_KEY, and the CLI PREFERS that over
+            # CLAUDE_CODE_OAUTH_TOKEN. On this deployment that config value is
+            # set for one reason only: memU cannot use an OAuth token and needs
+            # a real key. The effect was that setting a key for the memory
+            # layer silently moved the ENTIRE agent onto pay-per-token billing
+            # and burned through $15 of credits in a day with nothing to show
+            # it — the parent process env was clean, so the obvious check
+            # passed, and the key was only visible in the spawned CLI's
+            # /proc/<pid>/environ.
+            #
+            # So: if a subscription token is present, it wins, and no API key
+            # goes into the child's environment. This is not a preference knob.
+            # Losing money silently is the failure being prevented.
+            if api_key and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+                logger.warning(
+                    "Refusing to put ANTHROPIC_API_KEY in the agent "
+                    "environment: CLAUDE_CODE_OAUTH_TOKEN is set and the "
+                    "subscription must be the only inference path. The key "
+                    "in config is ignored for agent turns.",
+                )
+                api_key = ""
             if api_key:
                 env["ANTHROPIC_API_KEY"] = api_key
             if config.proxy.enabled:
