@@ -21,6 +21,19 @@ phone and never responds to the person who actually owns it.
 is echoed back as a syncMessage moments later. Without suppression the agent
 answers its own reply, forever. The send API returns the message timestamp, so
 we remember what we sent and drop the echo (see ``_sent_timestamps``).
+
+*And the sender is NOT enough to tell who a message is for.* This is the
+subtle one, and it was a real bug. A linked device syncs EVERY message the
+operator sends from their phone — to their partner, to a group, to anyone —
+as ``syncMessage.sentMessage`` with ``source`` set to the operator's own
+number. An allowlist that checks only ``source`` therefore passes all of them,
+and the agent treats every text the operator sends to another human as a
+prompt addressed to itself. What distinguishes Note to Self is the
+DESTINATION: only there does it equal the account's own number.
+
+So this channel routes on the conversation, not the sender. Note to Self is
+the only thing that reaches the agent. Everything else is recorded as history
+the agent can read on request, and is never answered. See ``_classify``.
 """
 
 from __future__ import annotations
@@ -28,7 +41,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sqlite3
+import time
 from collections import OrderedDict, deque
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -213,14 +230,136 @@ class SignalChannel(BaseChannel):
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, _RECONNECT_MAX)
 
+    # ------------------------------------------------------------------ #
+    #  Classification — which conversation is this?                        #
+    # ------------------------------------------------------------------ #
+
+    def _own_number(self) -> str:
+        return (self._cfg().number or "").strip()
+
+    def _classify(self, envelope: dict) -> tuple[str, str, str, Any]:
+        """Return ``(kind, peer, text, timestamp)``.
+
+        ``kind`` is one of:
+
+        * ``note_to_self`` — the operator talking TO THE AGENT. The only kind
+          that is answered.
+        * ``incoming``     — somebody else messaging the operator.
+        * ``outgoing``     — the operator messaging somebody else, synced here
+          from their phone.
+        * ``echo``         — this channel's own reply coming back.
+        * ``ignore``       — receipts, typing, read states, empty bodies.
+
+        ``peer`` is the other party in the conversation, which is the sender
+        for ``incoming`` and the destination for ``outgoing``.
+        """
+        source = envelope.get("source") or envelope.get("sourceNumber") or ""
+        own = self._own_number()
+
+        data = envelope.get("dataMessage")
+        if isinstance(data, dict):
+            text = data.get("message") or ""
+            ts = envelope.get("timestamp")
+            if not text:
+                return ("ignore", source, "", ts)
+            # A dataMessage from our own number is Note to Self arriving the
+            # other way round on some client versions; treat it as such.
+            if source and own and source == own and not data.get("groupInfo"):
+                return ("note_to_self", source, text, ts)
+            return ("incoming", source, text, ts)
+
+        sync = envelope.get("syncMessage") or {}
+        sent = sync.get("sentMessage")
+        if isinstance(sent, dict):
+            ts = sent.get("timestamp")
+            if ts is not None and ts in self._sent_timestamps:
+                return ("echo", source, "", ts)
+            text = sent.get("message") or ""
+            if not text:
+                return ("ignore", source, "", ts)
+
+            # A group message has no destination; it is never Note to Self.
+            group = sent.get("groupInfo") or sent.get("groupV2")
+            dest = (sent.get("destinationNumber") or sent.get("destination")
+                    or "")
+            if group:
+                gid = ""
+                if isinstance(group, dict):
+                    gid = str(group.get("groupId") or group.get("id") or "")
+                return ("outgoing", f"group:{gid}" if gid else "group", text, ts)
+            if own and dest and dest == own:
+                return ("note_to_self", own, text, ts)
+            if not dest:
+                # Unknown shape. Log it once at debug rather than guessing it
+                # is for us — guessing wrong here is what caused the original
+                # bug, and the fail-safe direction is "not addressed to me".
+                logger.debug("signal: sentMessage with no destination: %s",
+                             sorted(sent.keys()))
+                return ("ignore", source, "", ts)
+            return ("outgoing", dest, text, ts)
+
+        return ("ignore", source, "", envelope.get("timestamp"))
+
+    # ------------------------------------------------------------------ #
+    #  History — readable, never answered                                  #
+    # ------------------------------------------------------------------ #
+
+    def _history_db(self) -> Path:
+        home = os.environ.get("NERVE_HOME") or str(Path.home() / ".nerve")
+        return Path(home) / "signal-history.db"
+
+    def _record(self, kind: str, peer: str, text: str, ts: Any) -> None:
+        """Append a non-agent message to the readable history.
+
+        Sachin asked that the agent be able to READ his other Signal
+        conversations while only ever talking to him in Note to Self, so those
+        messages are stored rather than dropped. This is a plain local SQLite
+        file with no index and no LLM anywhere near it — the `signal` skill
+        greps it.
+
+        Best-effort on purpose: history is a convenience, and a write failure
+        must never break message handling.
+        """
+        try:
+            db = self._history_db()
+            db.parent.mkdir(parents=True, exist_ok=True)
+            con = sqlite3.connect(str(db), timeout=5)
+            try:
+                con.execute(
+                    "create table if not exists messages ("
+                    "ts integer, direction text, peer text, peer_name text, "
+                    "body text, recorded_at integer, "
+                    "primary key (ts, direction, peer))"
+                )
+                con.execute(
+                    "insert or ignore into messages values (?,?,?,?,?,?)",
+                    (int(ts) if ts is not None else int(time.time() * 1000),
+                     kind, peer, "", text, int(time.time())),
+                )
+                con.commit()
+            finally:
+                con.close()
+        except Exception as e:
+            logger.debug("signal: could not record history: %s", e)
+
     async def _handle_raw(self, raw: str | bytes) -> None:
         payload = json.loads(raw)
         envelope = payload.get("envelope") or {}
-        source = envelope.get("source") or envelope.get("sourceNumber") or ""
 
-        text, is_echo = self._extract_text(envelope)
-        if is_echo or not text:
+        kind, peer, text, ts = self._classify(envelope)
+        if kind in ("echo", "ignore"):
             return
+
+        # Everything that is not the operator talking to the agent is recorded
+        # and then dropped. This is the fix for the bug in the module
+        # docstring: these used to reach the router and be answered.
+        if kind != "note_to_self":
+            self._record(kind, peer, text, ts)
+            logger.debug("signal: recorded %s message with %s (%d chars)",
+                         kind, peer, len(text))
+            return
+
+        source = peer or self._own_number()
 
         if not self._is_allowed(source):
             logger.warning("signal: ignoring message from non-allowlisted %s", source)
@@ -309,41 +448,43 @@ class SignalChannel(BaseChannel):
             if stopped else
             "Nothing was running. Ready when you are."))
 
-    def _extract_text(self, envelope: dict) -> tuple[str, bool]:
-        """Pull the message body out of an envelope.
-
-        Returns ``(text, is_echo)``. Handles both shapes:
-
-        * ``dataMessage`` — someone else messaging the account.
-        * ``syncMessage.sentMessage`` — a message sent from *any* device on
-          this account, including the operator's phone (Note to Self) and
-          including this channel's own replies.
-
-        The second case is why echo suppression exists: our own sends come
-        back here, and answering them would loop forever.
-        """
-        data = envelope.get("dataMessage")
-        if isinstance(data, dict):
-            return (data.get("message") or "", False)
-
-        sync = envelope.get("syncMessage") or {}
-        sent = sync.get("sentMessage")
-        if isinstance(sent, dict):
-            ts = sent.get("timestamp")
-            if ts is not None and ts in self._sent_timestamps:
-                return ("", True)  # our own reply, echoed back
-            return (sent.get("message") or "", False)
-
-        # Receipts, typing indicators, read states — nothing to act on.
-        return ("", False)
-
     # ------------------------------------------------------------------ #
     #  Send                                                                #
     # ------------------------------------------------------------------ #
 
+    def _may_send_to(self, target: str) -> bool:
+        """May the agent put a message into this conversation?
+
+        Note to Self always. Anything else only if the number is listed in
+        ``signal.outbound_allowed_numbers``, which is empty by default.
+
+        This is enforced here, at the one place every outbound path funnels
+        through, rather than by telling the agent not to. Reading someone's
+        messages and writing into their thread are different powers: the agent
+        is given the first freely and the second not at all, because a message
+        sent under Sachin's name to another person cannot be recalled and does
+        not look like it came from an agent.
+        """
+        own = self._own_number()
+        t = (target or "").strip()
+        if not t:
+            return False
+        if own and t == own:
+            return True
+        if t in (self._cfg().outbound_allowed_numbers or []):
+            return True
+        logger.warning(
+            "signal: REFUSING to send to %s — not Note to Self and not in "
+            "signal.outbound_allowed_numbers. Add the number there to allow "
+            "it deliberately.", t,
+        )
+        return False
+
     async def send(self, message: OutboundMessage) -> None:
         if not self._client:
             logger.error("signal: send called before start()")
+            return
+        if not self._may_send_to(message.target):
             return
 
         cfg = self._cfg()
@@ -375,9 +516,10 @@ class SignalChannel(BaseChannel):
         """Best-effort typing indicator.
 
         Purely cosmetic: a failure here must never interfere with the actual
-        reply, so it is swallowed.
+        reply, so it is swallowed. Gated the same as send() — a typing
+        indicator appearing in someone else's thread is itself a message.
         """
-        if not self._client:
+        if not self._client or not self._may_send_to(target):
             return
         try:
             await self._client.put(
@@ -401,7 +543,7 @@ class SignalChannel(BaseChannel):
         Best-effort: a failed reaction must never interfere with the real
         reply, so nothing is raised.
         """
-        if not self._client:
+        if not self._client or not self._may_send_to(target):
             return
         author = self._inbound_authors.get(int(message_id), target)
         try:
@@ -422,7 +564,7 @@ class SignalChannel(BaseChannel):
         import base64
         import os
 
-        if not self._client:
+        if not self._client or not self._may_send_to(target):
             return False
         try:
             with open(file_path, "rb") as f:
