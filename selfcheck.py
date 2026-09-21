@@ -142,8 +142,69 @@ def check_binaries() -> list[str]:
     return [f"tooling: {b} is not installed (a skill depends on it)" for b in missing]
 
 
+# Directories that MUST be on their own volume rather than the container's
+# writable layer. Anything here is state a restart would otherwise destroy
+# without a word.
+#
+# /root/.claude earned its place: it holds the Agent SDK's conversation
+# .jsonl transcripts, which are what a resume actually reads. nerve keeps the
+# session mapping in its own database on a different volume, so when this one
+# was missing the mapping survived a restart and the transcript it pointed at
+# did not. Every conversation silently reset on every deploy, and the only
+# visible symptom was the agent saying it was "starting fresh without
+# context" while still knowing the topic.
+PERSISTENT_DIRS = ["/root/.claude", "/root/.nerve", "/root/.config"]
+
+
+def check_persistence() -> list[str]:
+    """Each persistent directory must be a mount point, not the rootfs.
+
+    A directory on the container's writable layer and one backed by a PVC are
+    indistinguishable by listing them — the difference only shows up a restart
+    later, as missing data. Comparing st_dev against the parent catches it now.
+    """
+    problems = []
+    for d in PERSISTENT_DIRS:
+        try:
+            if not os.path.isdir(d):
+                problems.append(f"persistence: {d} does not exist")
+            elif os.stat(d).st_dev == os.stat(os.path.dirname(d) or "/").st_dev:
+                problems.append(
+                    f"persistence: {d} is on the container filesystem, not a "
+                    f"volume — its contents will be lost on every restart"
+                )
+        except OSError as e:
+            problems.append(f"persistence: cannot stat {d}: {e}")
+    return problems
+
+
+def check_claude_config_dir() -> list[str]:
+    """CLAUDE_CONFIG_DIR must agree with where nerve looks for transcripts.
+
+    nerve's validate_resume_target() hardcodes ~/.claude/projects. If the CLI
+    is pointed somewhere else the two disagree about where history lives, and
+    the failure is silent context loss rather than an error.
+    """
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    if configured and os.path.realpath(configured) != os.path.realpath(
+        os.path.expanduser("~/.claude")
+    ):
+        return [
+            f"persistence: CLAUDE_CONFIG_DIR={configured} but nerve reads "
+            f"transcripts from ~/.claude/projects — resumes will silently "
+            f"start fresh"
+        ]
+    return []
+
+
 def main() -> int:
-    problems = check_config() + check_binaries() + check_model()
+    problems = (
+        check_config()
+        + check_binaries()
+        + check_persistence()
+        + check_claude_config_dir()
+        + check_model()
+    )
     if problems:
         print("=" * 68, file=sys.stderr)
         print("STARTUP SELF-CHECK FAILED — refusing to start", file=sys.stderr)
