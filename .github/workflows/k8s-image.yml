@@ -18,7 +18,10 @@ name: k8s image
 
 on:
   push:
-    branches: [signal]
+    # rebase/** is where the agent's weekly rebase lands first: it gets the
+    # full test run, and only if that passes does `signal` move to it. Images
+    # are only ever published from `signal` (see the `image` job).
+    branches: [signal, "rebase/**"]
   schedule:
     # 09:15 UTC = 02:15 Pacific: after the day, before the deployer's 03:30.
     - cron: "15 9 * * *"
@@ -121,7 +124,7 @@ jobs:
 
   image:
     needs: [versions, backend-tests, frontend-tests]
-    if: needs.versions.outputs.build == 'true'
+    if: needs.versions.outputs.build == 'true' && github.ref == 'refs/heads/signal'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

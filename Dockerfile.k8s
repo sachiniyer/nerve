@@ -42,10 +42,21 @@ ARG CLAUDE_CODE_VERSION=2.1.280
 ARG CLAUDE_AGENT_SDK_VERSION=0.2.158
 
 # curl: healthcheck + release downloads. git: workspace sync. gpg: apt keyrings.
-# ca-certificates: TLS for everything.
+# ca-certificates: TLS for everything. openssh-client: the agent pushes its own
+# rebases to the fork over SSH with a repo-scoped deploy key (the nerve-update
+# skill). Before this, `git fetch` over SSH in this container failed with
+# "cannot run ssh" — and then `merge --ff-only` reported "Already up to date"
+# against a stale ref, which is worse than failing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl git gpg ca-certificates \
+      curl git gpg ca-certificates openssh-client jq \
     && rm -rf /var/lib/apt/lists/*
+
+# GitHub's SSH host keys, from GitHub's own API over HTTPS — authenticated by
+# TLS, unlike an ssh-keyscan at build time, which would trust whatever answered.
+RUN mkdir -p /etc/ssh \
+    && curl -fsS https://api.github.com/meta \
+       | jq -r '.ssh_keys[] | "github.com " + .' > /etc/ssh/ssh_known_hosts \
+    && grep -q ssh-ed25519 /etc/ssh/ssh_known_hosts
 
 # GitHub CLI — the agent uses it to open config-change PRs against the
 # workspace repo (see propose_config_change).
