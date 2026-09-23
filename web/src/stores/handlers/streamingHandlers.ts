@@ -474,6 +474,13 @@ export function handleDone(
   finalizeRunningPanels(get);
   // Reload sessions to pick up updated_at changes
   get().loadSessions();
+  // Deliver anything the user queued while this turn ran. Deferred a tick so
+  // the finished reply commits to the message list before the next user
+  // bubble is appended under it. Only here, on a NATURAL finish — not in
+  // handleStopped or handleError: after a stop the user is deciding what
+  // happens next, and firing their queue into a failing session just fails
+  // it again. There the queue waits, visible, for an explicit Send.
+  setTimeout(() => get().flushQueue(), 0);
 }
 
 export function handleStopped(
