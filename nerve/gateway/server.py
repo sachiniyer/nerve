@@ -1009,6 +1009,18 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok", "version": "0.1.0"}
 
+    # FORK PATCH — lets the out-of-pod deployer avoid restarting mid-turn.
+    #
+    # The deployment uses `strategy: Recreate`, so every rollout kills the
+    # running turn. The nerve-deployer CronJob polls this before it patches
+    # the image and waits while anything is running — including a turn that
+    # is blocked on an AskUserQuestion, which counts as running. Unauthenticated
+    # like /health, and it exposes only a count. See k3s-configs/nerve.
+    @app.get("/health/activity", include_in_schema=False)
+    async def health_activity():
+        running = len(_engine.sessions.get_running_ids()) if _engine else 0
+        return {"running": running}
+
     # Favicon from the tracked config subtree (see config.workspace_favicon).
     # No auth: a browser asks for this before anyone has logged in, so requiring
     # a token would mean the login page never has an icon.

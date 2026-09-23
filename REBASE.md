@@ -23,6 +23,7 @@ groups:
 | `selfcheck.py` | startup assertion |
 | `Dockerfile.k8s` | k8s image (upstream gitignores plain `Dockerfile`, which is why ours is named differently — do not rename it back) |
 | `web/public/*` | PWA manifest, service worker and icons. Vite copies `public/` into `dist/` verbatim and upstream has no such directory |
+| `.github/workflows/k8s-image.yml` | builds and publishes the k8s image — on push to `signal`, daily for new CLI/SDK releases, and on demand. Upstream's `ci.yml` only runs on `main`, so this is also the only thing that tests this branch |
 | `web/src/stores/helpers/queueStorage.ts` | persists the web message queue per session (see below) |
 | `web/src/stores/messageQueue.test.ts` | the queue's tests |
 
@@ -45,6 +46,9 @@ comment, so the count overstates it.
    **before** `# Start cron service`
 2. `if signal_channel: await signal_channel.stop()` in the shutdown path,
    right after the matching `telegram_channel` line
+3. `GET /health/activity` → `{"running": N}`, immediately **after** the
+   `/health` route. The out-of-pod deployer polls it so a rollout never kills
+   a turn in progress. Unauthenticated like `/health`; exposes only a count.
 
 Every one of them sits next to its Telegram equivalent. **If a rebase
 conflicts, the fix is always the same: find what upstream now does for
