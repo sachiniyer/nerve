@@ -1,0 +1,156 @@
+# Build the Kubernetes image for sachiniyer's nerve deployment.
+#
+# This file is fork-only (upstream has no such workflow), so it never
+# conflicts on a rebase. Upstream's ci.yml only runs on main; nothing tests the
+# `signal` branch except this.
+#
+# Why it runs on a schedule as well as on push: the Claude Code CLI and the
+# Agent SDK are tracked at their newest releases, ahead of upstream's pins (see
+# REBASE.md). A new CLI release is a reason to rebuild even when this branch has
+# not changed. The build is a no-op when the (commit, CLI, SDK) triple has
+# already been built, so the daily run costs a version lookup and nothing else.
+#
+# The image is PUBLISHED here and DEPLOYED elsewhere: the nerve-deployer
+# CronJob in the cluster moves the Deployment to the newest `:signal` digest,
+# waits for selfcheck, and rolls back if it fails. See k3s-configs/nerve.
+
+name: k8s image
+
+on:
+  push:
+    branches: [signal]
+  schedule:
+    # 09:15 UTC = 02:15 Pacific: after the day, before the deployer's 03:30.
+    - cron: "15 9 * * *"
+  workflow_dispatch:
+    inputs:
+      claude_code_version:
+        description: "Claude Code CLI version (blank = newest on npm)"
+        required: false
+      agent_sdk_version:
+        description: "claude-agent-sdk version (blank = newest on PyPI)"
+        required: false
+      force:
+        description: "Rebuild even if this exact triple was already built"
+        type: boolean
+        default: false
+
+concurrency:
+  group: k8s-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/sachiniyer/nerve
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      cli: ${{ steps.v.outputs.cli }}
+      sdk: ${{ steps.v.outputs.sdk }}
+      tag: ${{ steps.v.outputs.tag }}
+      build: ${{ steps.v.outputs.build }}
+    steps:
+      - id: v
+        env:
+          IN_CLI: ${{ inputs.claude_code_version }}
+          IN_SDK: ${{ inputs.agent_sdk_version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          cli="${IN_CLI:-$(npm view @anthropic-ai/claude-code version)}"
+          sdk="${IN_SDK:-$(curl -fsS https://pypi.org/pypi/claude-agent-sdk/json | jq -r .info.version)}"
+          [ -n "$cli" ] && [ -n "$sdk" ] || { echo "could not resolve versions"; exit 1; }
+          tag="signal-${GITHUB_SHA::7}-cli${cli}-sdk${sdk}"
+          echo "cli=$cli" >> "$GITHUB_OUTPUT"
+          echo "sdk=$sdk" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          # Skip if this exact triple already exists. Anonymous pull token is
+          # enough: the package is public.
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:sachiniyer/nerve:pull" | jq -r .token)
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json" \
+            "https://ghcr.io/v2/sachiniyer/nerve/manifests/$tag")
+          if [ "$code" = "200" ] && [ "${FORCE:-false}" != "true" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$tag already built — nothing to do"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::building $tag"
+          fi
+
+  backend-tests:
+    needs: versions
+    if: needs.versions.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.0"
+      # Upstream's lockfile, then the SDK we will actually ship over it —
+      # exactly what Dockerfile.k8s does. Testing against the locked SDK would
+      # test an image nobody runs.
+      - run: uv sync --extra test --locked --python 3.13
+      - run: uv pip install --python .venv/bin/python "claude-agent-sdk==${{ needs.versions.outputs.sdk }}"
+      - run: .venv/bin/pytest tests/ -q
+
+  frontend-tests:
+    needs: versions
+    if: needs.versions.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --strict-peer-deps
+      - run: npm test
+      - run: npm run build
+
+  image:
+    needs: [versions, backend-tests, frontend-tests]
+    if: needs.versions.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.k8s
+          push: true
+          # amd64 only: every node in the cluster is amd64, and a second
+          # platform doubles build time for nothing.
+          platforms: linux/amd64
+          provenance: false
+          build-args: |
+            CLAUDE_CODE_VERSION=${{ needs.versions.outputs.cli }}
+            CLAUDE_AGENT_SDK_VERSION=${{ needs.versions.outputs.sdk }}
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.versions.outputs.tag }}
+            ${{ env.IMAGE }}:signal
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: |
+          echo "### Built" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag: \`${{ needs.versions.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- digest: \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- CLI ${{ needs.versions.outputs.cli }}, SDK ${{ needs.versions.outputs.sdk }}" >> "$GITHUB_STEP_SUMMARY"
