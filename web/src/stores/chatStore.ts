@@ -10,6 +10,7 @@ import { randomUUID } from '../utils/uuid';
 import { cancelAutoClose, clearAllAutoCloseTimers, MAX_COMPLETED_TABS } from './helpers/blockHelpers';
 import { extractTodosFromMessages, extractCCTasksFromMessages } from './helpers/bufferReplay';
 import { loadDrafts, persistDraft, removeDraft, pruneDrafts } from './helpers/draftStorage';
+import { loadQueues, persistQueue, type QueuedMessage } from './helpers/queueStorage';
 import { loadReads, persistRead, removeRead, loadBaseline } from './helpers/readStorage';
 import { loadVirtualSession, persistVirtualSession, clearVirtualSession } from './helpers/virtualSessionStorage';
 // Handlers
@@ -108,6 +109,9 @@ interface ChatState {
   virtualSession: Session | null;
   // Per-session unsent input text, keyed by session id (incl. the virtual one).
   drafts: Record<string, string>;
+  // Per-session messages typed while a turn was running, sent when it ends.
+  // Web only — channels already queue server-side in ChannelRouter.
+  queued: Record<string, QueuedMessage[]>;
   // Per-session "last seen" moment (ms) + a one-time baseline. A session is
   // "unread" when its updated_at is newer than max(reads[id], readsBaseline).
   reads: Record<string, number>;
@@ -255,7 +259,14 @@ interface ChatState {
   clearSearch: () => void;
   /** Trigger the sidebar to mount + focus the search input (used by Cmd+K). */
   requestSearchFocus: () => void;
-  sendMessage: (content: string) => void;
+  sendMessage: (content: string, fileIds?: string[], imageBlocks?: Array<{ url: string; filename: string; media_type: string }>) => void;
+  /** Hold a message for the active session until its running turn ends. */
+  enqueueMessage: (content: string, fileIds?: string[], imageBlocks?: Array<{ url: string; filename: string; media_type: string }>) => void;
+  /** Drop one queued message from the active session. */
+  removeQueued: (id: string) => void;
+  /** Send everything queued for the active session as ONE message. No-op
+   *  while a turn is running or when nothing is queued. */
+  flushQueue: () => void;
   /** Defer a composed prompt into a new session without running the model
    *  now. ``delay`` is one of "30m" | "1h" | "24h" | "none". */
   runLater: (
@@ -343,6 +354,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   virtualSession: restoreVirtualSession(),
   // Rehydrated from localStorage so unsent composer text survives a reload.
   drafts: loadDrafts(),
+  // Rehydrated for the same reason as drafts: a killed PWA must not lose a
+  // follow-up the user already committed to sending.
+  queued: loadQueues(),
   // Read/unread tracking (client-only): per-session last-seen stamps + the
   // first-run baseline that keeps pre-existing sessions from all showing unread.
   reads: loadReads(),
@@ -1075,6 +1089,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.error('Failed to update session model:', e);
       repoint(prev);
     }
+  },
+
+  enqueueMessage: (content, fileIds, imageBlocks) => {
+    const session = get().activeSession;
+    const item: QueuedMessage = {
+      id: randomUUID(),
+      content,
+      ...(fileIds?.length ? { fileIds } : {}),
+      ...(imageBlocks?.length ? { imageBlocks } : {}),
+    };
+    const next = [...(get().queued[session] || []), item];
+    set((s) => ({ queued: { ...s.queued, [session]: next } }));
+    persistQueue(session, next);
+  },
+
+  removeQueued: (id) => {
+    const session = get().activeSession;
+    const next = (get().queued[session] || []).filter((q) => q.id !== id);
+    set((s) => ({ queued: { ...s.queued, [session]: next } }));
+    persistQueue(session, next);
+  },
+
+  flushQueue: () => {
+    const { activeSession: session, isStreaming, queued } = get();
+    const items = queued[session] || [];
+    if (isStreaming || items.length === 0) return;
+    // Clear BEFORE sending, so a flush that re-enters (done -> send -> done)
+    // can never deliver the same item twice.
+    set((s) => ({ queued: { ...s.queued, [session]: [] } }));
+    persistQueue(session, []);
+    // One turn, not N. Same shape as ChannelRouter._run_batch, so web and
+    // Signal behave alike: a correction and its follow-up are read together
+    // rather than the agent answering the first before seeing the second.
+    const content = items.map((q) => q.content).filter(Boolean).join('\n\n');
+    const fileIds = items.flatMap((q) => q.fileIds || []);
+    const imageBlocks = items.flatMap((q) => q.imageBlocks || []);
+    void get().sendMessage(
+      content,
+      fileIds.length ? fileIds : undefined,
+      imageBlocks.length ? imageBlocks : undefined,
+    );
   },
 
   sendMessage: async (content: string, fileIds?: string[], imageBlocks?: Array<{ url: string; filename: string; media_type: string }>) => {

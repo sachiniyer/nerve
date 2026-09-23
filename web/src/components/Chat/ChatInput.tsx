@@ -3,6 +3,10 @@ import { Send, Square, X, Plus, Trash2, Sparkles, HelpCircle, StickyNote, Paperc
 import { Button, IconButton, Select, TextField } from '../ui';
 import { useChatStore, EMPTY_REVIEW_LOOP } from '../../stores/chatStore';
 import type { QuoteAction, QuoteEntry } from '../../stores/chatStore';
+import type { QueuedMessage } from '../../stores/helpers/queueStorage';
+
+// Stable empty value for the queued-messages selector; see its use below.
+const EMPTY_QUEUE: QueuedMessage[] = [];
 import { api } from '../../api/client';
 import { randomUUID } from '../../utils/uuid';
 import { findSessionById } from '../../utils/findSession';
@@ -82,6 +86,14 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
   const activeSession = useChatStore(s => s.activeSession);
   const ensureRealSession = useChatStore(s => s.ensureRealSession);
   const runLater = useChatStore(s => s.runLater);
+  // Messages typed while a turn runs are held here and sent when it ends.
+  // EMPTY_QUEUE is a module constant so the selector returns a stable
+  // reference when a session has nothing queued (a fresh [] each render would
+  // re-render every time the store changes).
+  const queued = useChatStore(s => s.queued[s.activeSession] ?? EMPTY_QUEUE);
+  const enqueueMessage = useChatStore(s => s.enqueueMessage);
+  const removeQueued = useChatStore(s => s.removeQueued);
+  const flushQueue = useChatStore(s => s.flushQueue);
   const isNewChat = useChatStore(s => s.messages.length === 0);
 
   // Persist the composer draft, but NOT on every keystroke. Writing to the
@@ -313,10 +325,15 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
 
   const allUploaded = attachments.length === 0 || attachments.every(a => !a.uploading);
   const hasContent = input.trim() || quotes.length > 0 || attachments.some(a => a.uploadedId);
-  const canSend = !disabled && !isStreaming && !rewriteActive && hasContent && allUploaded;
+  // While a turn runs, "send" means "queue": the composer is never blocked.
+  // When idle, Send also delivers anything left in the queue — that is how a
+  // queue held back by Stop (see handleStopped) gets sent.
+  const canSend = !disabled && !rewriteActive && (
+    (hasContent && allUploaded) || (!isStreaming && queued.length > 0)
+  );
 
   /** Actually dispatch a message (with current attachments) and reset the composer. */
-  const dispatchSend = (message: string) => {
+  const dispatchSend = (message: string, sink: typeof onSend = onSend) => {
     const fileIds = attachments.filter(a => a.uploadedId).map(a => a.uploadedId!);
     const imageBlocks = attachments
       .filter(a => a.uploadedId && a.uploadedMeta?.file_type === 'image')
@@ -326,7 +343,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
         media_type: a.uploadedMeta!.media_type,
       }));
 
-    onSend(message, fileIds.length > 0 ? fileIds : undefined, imageBlocks.length > 0 ? imageBlocks : undefined);
+    sink(message, fileIds.length > 0 ? fileIds : undefined, imageBlocks.length > 0 ? imageBlocks : undefined);
     cancelDraftFlush();
     setInput('');
     historyIndexRef.current = -1;
@@ -373,6 +390,22 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
 
   const handleSend = () => {
     const message = composeMessage();
+    const hasComposed = !!message || attachments.some(a => a.uploadedId);
+
+    // Mid-turn: hold it. It goes out when the turn finishes (handleDone).
+    if (isStreaming) {
+      if (hasComposed) dispatchSend(message, enqueueMessage);
+      return;
+    }
+
+    // Idle with a queue waiting (a turn was stopped): send the queue plus
+    // whatever is in the composer, as one message, in the order typed.
+    if (queued.length > 0) {
+      if (hasComposed) dispatchSend(message, enqueueMessage);
+      flushQueue();
+      return;
+    }
+
     if (!message && attachments.length === 0) return;
 
     // First message of a new chat with rewrite on → preview instead of send.
@@ -570,6 +603,37 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
       {isDragging && (
         <div className="absolute inset-0 z-50 bg-accent/10 border-2 border-dashed border-accent rounded-lg flex items-center justify-center">
           <span className="text-accent font-medium text-sm">Drop files here</span>
+        </div>
+      )}
+
+      {/* Queued messages — typed while the agent was working. Sent together as
+          one message when the turn finishes; held for an explicit Send if the
+          turn was stopped instead. */}
+      {queued.length > 0 && (
+        <div className="px-4 pt-3 flex flex-col gap-1.5" aria-label="Queued messages">
+          <div className="text-xs text-text-muted">
+            {isStreaming
+              ? `Queued — sends when this turn finishes`
+              : `Queued — press Send to deliver`}
+          </div>
+          {queued.map((q) => (
+            <div
+              key={q.id}
+              className="flex items-start gap-2 px-3 py-2 rounded-lg bg-surface-raised border border-border-subtle text-sm text-text"
+            >
+              <span className="flex-1 whitespace-pre-wrap break-words line-clamp-3">
+                {q.content || `(${(q.fileIds?.length ?? 0)} attachment${q.fileIds?.length === 1 ? '' : 's'})`}
+              </span>
+              <IconButton
+                label="Remove queued message"
+                variant="ghost"
+                size="xs"
+                onClick={() => removeQueued(q.id)}
+              >
+                <X size={14} />
+              </IconButton>
+            </div>
+          ))}
         </div>
       )}
 
@@ -855,7 +919,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
             )}
           </div>
 
-          {isStreaming ? (
+          {isStreaming && (
             /* Native: this is a solid destructive fill, and IconButton has no
                `dangerSolid` — its `danger` is red-on-transparent. `bg-error-solid`
                rather than `bg-error`, which is the pale feedback foreground. */
@@ -868,11 +932,18 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
             >
               <Square size={16} />
             </button>
-          ) : (
-            <IconButton label="Send" variant="primary" size="md" onClick={handleSend} disabled={!canSend}>
-              <Send size={18} />
-            </IconButton>
           )}
+          {/* Always present: mid-turn it queues instead of sending, so the
+              composer is never a dead end while the agent works. */}
+          <IconButton
+            label={isStreaming ? 'Queue message' : 'Send'}
+            variant="primary"
+            size="md"
+            onClick={handleSend}
+            disabled={!canSend}
+          >
+            <Send size={18} />
+          </IconButton>
         </div>
       </div>
     </div>

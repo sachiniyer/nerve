@@ -23,6 +23,8 @@ groups:
 | `selfcheck.py` | startup assertion |
 | `Dockerfile.k8s` | k8s image (upstream gitignores plain `Dockerfile`, which is why ours is named differently — do not rename it back) |
 | `web/public/*` | PWA manifest, service worker and icons. Vite copies `public/` into `dist/` verbatim and upstream has no such directory |
+| `web/src/stores/helpers/queueStorage.ts` | persists the web message queue per session (see below) |
+| `web/src/stores/messageQueue.test.ts` | the queue's tests |
 
 Git has nothing to merge against. A rebase carries them across untouched.
 
@@ -62,6 +64,27 @@ All three are whole blocks appended at the edges of `<head>` and `<body>`,
 which is where upstream is least likely to be editing. If upstream adopts its
 own PWA setup, **delete ours rather than merging the two** — two manifests and
 two service workers is worse than either.
+
+**`web/src/…` — the message queue (upstream issue #445).** The web composer
+could not send while a turn ran. Typed messages are now held as removable chips
+and sent as ONE message when the turn finishes naturally; after a Stop or an
+error they wait for an explicit Send. Three small insertions:
+
+1. `stores/chatStore.ts` — `queued` state, and `enqueueMessage` /
+   `removeQueued` / `flushQueue`, placed immediately **before**
+   `sendMessage:`. Also widens the declared `sendMessage` type to the three
+   arguments its implementation already takes.
+2. `stores/handlers/streamingHandlers.ts` — one deferred `flushQueue()` call
+   at the end of `handleDone`. Deliberately NOT in `handleStopped` or
+   `handleError`.
+3. `components/Chat/ChatInput.tsx` — `canSend` no longer requires
+   `!isStreaming`; `handleSend` queues mid-turn; Stop and Send are both shown
+   while streaming; chips render above the review-loop panel.
+
+**If upstream closes #445, drop ours entirely** rather than merging — two
+queues would each think they own the composer. Theirs may well route through
+the server instead (the issue suggests `ChannelRouter`), which would make the
+client-side queue redundant rather than conflicting.
 
 ---
 
