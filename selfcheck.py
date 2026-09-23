@@ -134,6 +134,102 @@ def check_model() -> list[str]:
     return []
 
 
+# Connection-level failures that say nothing about the build. Matched against
+# the CLI's output so a network blip at boot warns instead of bricking the
+# rollout — the same policy check_model applies to the raw API call.
+_NETWORK_SIGNS = ("ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN",
+                  "getaddrinfo", "network", "timed out", "socket hang up")
+
+
+def check_toolchain() -> list[str]:
+    """The CLI and SDK are the ones this image was built with, and they work.
+
+    This deployment tracks the Claude Code CLI and the Agent SDK well ahead of
+    upstream nerve, so the image installs both itself (see Dockerfile.k8s).
+    Three ways that can go quietly wrong, each checked:
+
+    * an SDK that re-bundles its own CLI would shadow the standalone one,
+      because the SDK prefers bundled over PATH — and the version pin would
+      then mean nothing;
+    * the SDK override could fail to take and leave the locked version;
+    * the configured default model might not exist on this CLI at all. That
+      is exactly what happened with Opus 5.5: the model shipped, the bundled
+      CLI did not know it, and nothing said so until a turn failed. So the
+      model is exercised through the real CLI, not just the raw API.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    problems: list[str] = []
+    want_sdk = os.environ.get("NERVE_AGENT_SDK_VERSION", "")
+    want_cli = os.environ.get("NERVE_CLAUDE_CODE_VERSION", "")
+
+    try:
+        import claude_agent_sdk as sdk
+
+        if want_sdk and sdk.__version__ != want_sdk:
+            problems.append(f"toolchain: claude-agent-sdk is {sdk.__version__}, "
+                            f"the image was built for {want_sdk}")
+        bundled = os.path.join(os.path.dirname(sdk.__file__), "_bundled", "claude")
+        if os.path.exists(bundled):
+            problems.append("toolchain: the SDK's bundled CLI is present and will "
+                            "shadow the standalone one — the CLI pin is not in effect")
+    except Exception as e:
+        problems.append(f"toolchain: cannot import claude_agent_sdk: {e}")
+
+    cli = shutil.which("claude")
+    if not cli:
+        return problems + ["toolchain: no `claude` on PATH"]
+    try:
+        ver = subprocess.run([cli, "--version"], capture_output=True, text=True,
+                             timeout=30).stdout.strip()
+    except Exception as e:
+        return problems + [f"toolchain: `claude --version` failed: {e}"]
+    if want_cli and not ver.startswith(want_cli):
+        problems.append(f"toolchain: claude CLI is {ver!r}, expected {want_cli}")
+
+    try:
+        from nerve.config import get_config
+
+        model = get_config().agent.model
+    except Exception as e:
+        return problems + [f"toolchain: cannot read agent.model: {e}"]
+
+    # A throwaway config dir: this call must not write a transcript or touch
+    # .claude.json on the persistent volume. Auth comes from the env token.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": tmp}
+        env.pop("ANTHROPIC_API_KEY", None)
+        try:
+            r = subprocess.run(
+                [cli, "-p", "Reply with exactly the word OK.", "--model", model,
+                 "--max-turns", "1", "--output-format", "json"],
+                capture_output=True, text=True, timeout=180, env=env, cwd=tmp,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"selfcheck: WARN {model} via CLI timed out; skipping", file=sys.stderr)
+            return problems
+        out = (r.stdout or "") + (r.stderr or "")
+        failed = r.returncode != 0
+        if not failed:
+            try:
+                failed = bool(json.loads(r.stdout).get("is_error"))
+            except Exception:
+                pass
+        if failed:
+            if any(sign.lower() in out.lower() for sign in _NETWORK_SIGNS):
+                print(f"selfcheck: WARN {model} via CLI hit a network error; "
+                      f"skipping", file=sys.stderr)
+            else:
+                problems.append(f"toolchain: default model {model} does not work "
+                                f"through CLI {ver}: {out.strip()[:240]}")
+    if not problems:
+        print(f"selfcheck: {model} OK through claude {ver} "
+              f"(sdk {want_sdk or 'unpinned'})")
+    return problems
+
+
 def check_binaries() -> list[str]:
     """Every CLI a skill depends on must be on PATH."""
     import shutil
@@ -242,6 +338,7 @@ def main() -> int:
     problems = (
         check_config()
         + check_subscription_only()
+        + check_toolchain()
         + check_binaries()
         + check_persistence()
         + check_claude_config_dir()
