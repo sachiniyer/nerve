@@ -88,6 +88,27 @@ client-side queue redundant rather than conflicting.
 
 ---
 
+## The CLI and SDK move faster than upstream — on purpose
+
+This deployment tracks the **Claude Code CLI** and the **Claude Agent SDK**
+well ahead of upstream nerve's pins. Neither is done by editing
+`pyproject.toml` or `uv.lock`:
+
+- The **SDK** is installed *over* the locked version in `Dockerfile.k8s`, after
+  `uv sync`. `uv.lock` stays byte-identical to upstream's, so a rebase never
+  conflicts on it — which matters, because a lockfile conflict is the one kind
+  a rebase cannot resolve by re-finding an anchor.
+- The **CLI** is a standalone `npm install -g @anthropic-ai/claude-code`, and
+  the copy bundled inside the SDK wheel is deleted so the SDK falls back to it.
+
+Both versions are build args (`CLAUDE_CODE_VERSION`,
+`CLAUDE_AGENT_SDK_VERSION`); the defaults in the Dockerfile are the last
+known-good pair. `selfcheck.py` fails the rollout if either did not take, or if
+the configured default model does not work through the real CLI.
+
+When upstream bumps its own SDK pin, that lands in `uv.lock` via the rebase as
+normal and is simply overridden again by the build arg.
+
 ## The procedure
 
 ```sh

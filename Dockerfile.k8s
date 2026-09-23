@@ -30,6 +30,17 @@ RUN npm run build
 # ------------------------------------------------------------------ runtime --
 FROM python:3.13-slim
 
+# The Claude Code CLI and the Claude Agent SDK move much faster than upstream
+# nerve does, and this deployment deliberately tracks them rather than
+# upstream's pins. Both are build args so the image pipeline can pass the
+# newest release; the defaults here are simply the last known-good pair.
+#
+# Neither touches uv.lock. The SDK is installed OVER the locked version after
+# `uv sync` (below), so the lockfile stays byte-identical to upstream's and a
+# rebase never conflicts on it. See REBASE.md.
+ARG CLAUDE_CODE_VERSION=2.1.280
+ARG CLAUDE_AGENT_SDK_VERSION=0.2.158
+
 # curl: healthcheck + release downloads. git: workspace sync. gpg: apt keyrings.
 # ca-certificates: TLS for everything.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -86,6 +97,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm install -g @stripe/link-cli@0.21.0 \
     && link-cli --version
 
+# Claude Code CLI — standalone, not the copy bundled inside the SDK wheel.
+# The SDK would otherwise pin the CLI to whatever its own release happened to
+# ship, which is how this deployment sat on a CLI that did not know Opus 5.5
+# for days after the model launched. The bundled copy is deleted further down
+# so the SDK falls back to this one (it prefers bundled over PATH).
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && claude --version
+
 # plann — CalDAV client for the iCloud calendar shared with Sachin's iPhone.
 # Chosen over khal+vdirsyncer deliberately: plann queries the server directly
 # with no local cache, so the agent cannot answer "what is on today" out of a
@@ -127,6 +146,23 @@ COPY README.md ./
 COPY nerve/ ./nerve/
 COPY --from=web /web/dist ./web/dist
 RUN uv sync --locked --no-dev
+
+# Newer SDK than the lockfile, installed over it — see the ARG comment above.
+# Then delete the CLI bundled in the wheel so the SDK resolves `claude` from
+# PATH, i.e. the standalone install. selfcheck.py asserts both, because a
+# future SDK that re-bundles a CLI would otherwise shadow ours silently.
+RUN uv pip install --python /opt/nerve-venv/bin/python --no-cache \
+      "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}" \
+    && SDK_DIR=$(/opt/nerve-venv/bin/python -c "import claude_agent_sdk, os; print(os.path.dirname(claude_agent_sdk.__file__))") \
+    && rm -f "$SDK_DIR/_bundled/claude" \
+    && /opt/nerve-venv/bin/python -c "import claude_agent_sdk as s; assert s.__version__ == '${CLAUDE_AGENT_SDK_VERSION}', s.__version__; print('sdk', s.__version__)"
+
+# Recorded for selfcheck and for whoever is debugging which build is running.
+ENV NERVE_CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
+ENV NERVE_AGENT_SDK_VERSION=${CLAUDE_AGENT_SDK_VERSION}
+LABEL org.opencontainers.image.source="https://github.com/sachiniyer/nerve" \
+      dev.nerve.claude-code-version="${CLAUDE_CODE_VERSION}" \
+      dev.nerve.agent-sdk-version="${CLAUDE_AGENT_SDK_VERSION}"
 
 # Paths match upstream's Docker defaults so nothing has to be re-taught.
 # Both are volume mounts in the Deployment.
