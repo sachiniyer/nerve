@@ -985,14 +985,15 @@ class SignalConfig:
     @classmethod
     @_coerced
     def from_dict(cls, d: dict) -> SignalConfig:
-        numbers = d.get("allowed_numbers") or []
-        if not isinstance(numbers, list):
-            logger.warning(
-                "signal.allowed_numbers is not a list (%r) — treating as empty, "
-                "which rejects every sender", numbers,
-            )
-            numbers = []
-        enabled = bool(d.get("enabled", False))
+        # Raw values in, upstream's coercion out — the same helpers every
+        # other config class uses. An earlier version hand-rolled this with
+        # bool(), which reads the string "false" as True: a ${VAR} reference
+        # set to "false" would have switched the channel ON. And list() on a
+        # bare string splits it into characters. `_str_list` hands a non-list
+        # to @_coerced, which wraps it as one element — so a single number
+        # given as a string means that one number, as a ${VAR} on a list
+        # field should.
+        enabled = _as_bool(d.get("enabled", False), False, label="SignalConfig.enabled")
         if enabled and not d.get("number"):
             logger.warning("signal.enabled is true but signal.number is unset — "
                            "the channel cannot start")
@@ -1000,11 +1001,10 @@ class SignalConfig:
             enabled=enabled,
             number=str(d.get("number", "")),
             api_url=str(d.get("api_url", "http://127.0.0.1:8080")),
-            allowed_numbers=[str(n) for n in numbers],
-            outbound_allowed_numbers=[
-                str(n) for n in (d.get("outbound_allowed_numbers") or [])
-                if str(n).strip()
-            ],
+            allowed_numbers=_str_list(d.get("allowed_numbers") or [], clean=True),
+            outbound_allowed_numbers=_str_list(
+                d.get("outbound_allowed_numbers") or [], clean=True,
+            ),
         )
 
 

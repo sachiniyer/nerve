@@ -41,7 +41,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sqlite3
 import time
 from collections import OrderedDict, deque
@@ -305,8 +304,11 @@ class SignalChannel(BaseChannel):
     # ------------------------------------------------------------------ #
 
     def _history_db(self) -> Path:
-        home = os.environ.get("NERVE_HOME") or str(Path.home() / ".nerve")
-        return Path(home) / "signal-history.db"
+        # Through nerve.paths, like every other machine-local file, so a
+        # NERVE_HOME override is honoured everywhere at once.
+        from nerve.paths import nerve_path
+
+        return nerve_path("signal-history.db")
 
     def _record(self, kind: str, peer: str, text: str, ts: Any) -> None:
         """Append a non-agent message to the readable history.
