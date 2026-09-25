@@ -170,6 +170,14 @@ RUN uv pip install --python /opt/nerve-venv/bin/python --no-cache \
 
 # Recorded for selfcheck and for whoever is debugging which build is running.
 ENV NERVE_CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
+# The CLI must never update itself inside a running container. The version is
+# chosen at build time, tested in CI, and verified by selfcheck at startup; a
+# runtime self-update would swap the binary under all three and leave the pod
+# running something nothing tested. New versions arrive through CI instead.
+# Telemetry off too: it logs a spurious [ERROR] on every turn in a container
+# (/sys/hypervisor/uuid), which buries real errors in any log sweep.
+ENV DISABLE_AUTOUPDATER=1
+ENV DISABLE_TELEMETRY=1
 ENV NERVE_AGENT_SDK_VERSION=${CLAUDE_AGENT_SDK_VERSION}
 LABEL org.opencontainers.image.source="https://github.com/sachiniyer/nerve" \
       dev.nerve.claude-code-version="${CLAUDE_CODE_VERSION}" \
