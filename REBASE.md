@@ -12,8 +12,16 @@ upstream file is a line that can conflict forever. Adding a new file is free.
 
 ## The delta, and why it barely conflicts
 
-Six commits, ~850 insertions, nine files. They split into two very different
-groups:
+Don't trust a hardcoded count here — they go stale (this line said "nine
+files" long after it was twenty). The live numbers are one command:
+
+```sh
+git diff --stat upstream/main...HEAD          # everything
+git diff --stat upstream/main...HEAD -- $(git diff --name-only upstream/main...HEAD \
+  | while read f; do git cat-file -e upstream/main:$f 2>/dev/null && echo $f; done)   # upstream files only
+```
+
+The changes split into two very different groups:
 
 ### Group 1 — new files. These can never conflict.
 
@@ -31,8 +39,21 @@ Git has nothing to merge against. A rebase carries them across untouched.
 
 ### Group 2 — patches into upstream files. **The only real risk.**
 
-Just **three files, ~124 lines**, all additive — and about half of that is
-comment, so the count overstates it.
+**Eight upstream files, ~330 lines** as of 2026-09-25, nearly all additive and
+roughly half comment. Every one is listed below with where it anchors. **If
+`git diff --name-only` shows an upstream file that is not in this section,
+this document is out of date — fix it before rebasing, not after.**
+
+| File | What | Why it must survive a rebase |
+|---|---|---|
+| `nerve/config.py` | `SignalConfig`, wired into `NerveConfig` | the Signal channel's settings |
+| `nerve/gateway/server.py` | Signal start/stop; `/health/activity` | the channel; the deployer's idle check |
+| `nerve/agent/backends/claude.py` | refuse `ANTHROPIC_API_KEY` in the CLI env when an OAuth token is set | **billing** — see below |
+| `nerve/memory/memu_bridge.py` | memU stays off without a real key | stops a silent 401 loop |
+| `web/index.html` | PWA tags + service worker registration | installable app |
+| `web/src/components/Chat/ChatInput.tsx` | queue while a turn runs | message queue (#445) |
+| `web/src/stores/chatStore.ts` | queue state + actions | message queue (#445) |
+| `web/src/stores/handlers/streamingHandlers.ts` | flush the queue on `done` | message queue (#445) |
 
 **`nerve/config.py`** — three insertions:
 1. `class SignalConfig` immediately **before** `class TelegramConfig`
@@ -54,6 +75,29 @@ Every one of them sits next to its Telegram equivalent. **If a rebase
 conflicts, the fix is always the same: find what upstream now does for
 Telegram, and put the Signal line beside it.** You are never reconstructing
 logic, only re-finding an anchor.
+
+**`nerve/agent/backends/claude.py`** — one insertion, in `_build_env`, directly
+**before** `if api_key: env["ANTHROPIC_API_KEY"] = api_key`. When
+`CLAUDE_CODE_OAUTH_TOKEN` is set, the configured API key is dropped instead of
+being injected into the CLI subprocess.
+
+**Dropping this silently moves every agent turn onto pay-per-token billing.**
+Upstream injects `config.effective_api_key` as `ANTHROPIC_API_KEY`, and the
+CLI prefers that over the OAuth token. It cost $15 in a day before anyone
+noticed, because the container's own environment looked clean — the key only
+existed in the spawned CLI. `selfcheck.py` fails the rollout if a key is
+configured, so a lost patch would fail loudly *if* the config also changed;
+it would not catch this patch alone disappearing. Check it by hand:
+
+```sh
+grep -n "Refusing to put ANTHROPIC_API_KEY" nerve/agent/backends/claude.py   # expect 1 hit
+```
+
+**`nerve/memory/memu_bridge.py`** — one insertion at the top of
+`MemUBridge.initialize`: return early when there is no API key, instead of
+upstream's fallback to the literal string `"placeholder"` and a 401 on every
+call while reporting itself initialized. If upstream adds a real off switch
+for memU, drop this and use theirs.
 
 **`web/index.html`** — three insertions, making the UI installable as a PWA:
 1. The manifest link, Apple touch icon and web-app meta tags, right after
@@ -152,8 +196,11 @@ increasing cost:
 # 1. it parses and the patches survived
 python3 -c "import ast;[ast.parse(open(f).read()) for f in \
   ['nerve/config.py','nerve/gateway/server.py','nerve/channels/signal.py']];print('ok')"
-grep -c 'SignalConfig' nerve/config.py            # expect 4
+grep -c 'SignalConfig' nerve/config.py            # expect 5
 grep -c 'signal_channel' nerve/gateway/server.py  # expect 6
+grep -c 'Refusing to put ANTHROPIC_API_KEY' nerve/agent/backends/claude.py  # expect 1
+grep -c 'memU disabled: no Anthropic API key' nerve/memory/memu_bridge.py   # expect 1
+grep -c 'health/activity' nerve/gateway/server.py  # expect 1
 
 # 2. build and roll out — the startup self-check runs here and fails the
 #    rollout if config or credentials broke
