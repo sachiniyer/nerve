@@ -45,6 +45,35 @@ function MessageListImpl({ messages, streamingBlocks, isStreaming, onForkMessage
     endRef.current?.scrollIntoView({ behavior: wasEmpty ? 'instant' : 'smooth' });
   }, [messages.length, streamingBlocks.length, isStreaming]);
 
+  // Stay pinned to the bottom when something changes size without changing
+  // the message count, which the effect above cannot see:
+  //   - the list itself shrinking: the composer growing as you type, or a
+  //     phone keyboard opening (the newest message slid under the composer —
+  //     159px of it on an iPhone);
+  //   - messages growing after they render: code highlighting, markdown and
+  //     images settle after the initial jump to the bottom, measured at
+  //     50-90px, which left the last line and timestamp cut off on load.
+  // Only while already at the bottom: someone reading back up stays put.
+  const resizeObs = useRef<ResizeObserver | null>(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (isNearBottom.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    resizeObs.current = ro;
+    return () => { ro.disconnect(); resizeObs.current = null; };
+  }, []);
+  // Rows are rendered straight into the container, so watch each one as it
+  // appears. observe() on an already-watched element is a no-op.
+  useEffect(() => {
+    const el = containerRef.current;
+    const ro = resizeObs.current;
+    if (!el || !ro) return;
+    for (const child of Array.from(el.children)) ro.observe(child);
+  }, [messages.length, streamingBlocks.length]);
+
   return (
     <div className="flex-1 overflow-y-auto relative" ref={containerRef} onScroll={handleScroll}>
       <SelectionToolbar containerRef={containerRef} />

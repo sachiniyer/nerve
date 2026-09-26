@@ -39,7 +39,7 @@ Git has nothing to merge against. A rebase carries them across untouched.
 
 ### Group 2 — patches into upstream files. **The only real risk.**
 
-**Eight upstream files, ~330 lines** as of 2026-09-25, nearly all additive and
+**Thirteen upstream files** as of 2026-09-26, nearly all additive and
 roughly half comment. Every one is listed below with where it anchors. **If
 `git diff --name-only` shows an upstream file that is not in this section,
 this document is out of date — fix it before rebasing, not after.**
@@ -54,6 +54,9 @@ this document is out of date — fix it before rebasing, not after.**
 | `web/src/components/Chat/ChatInput.tsx` | queue while a turn runs | message queue (#445) |
 | `web/src/stores/chatStore.ts` | queue state + actions | message queue (#445) |
 | `web/src/stores/handlers/streamingHandlers.ts` | flush the queue on `done` | message queue (#445) |
+| `web/src/index.css` | one block appended at the end: phone fixes | iOS zoom-on-focus, tables overflowing the whole conversation, long-word wrapping, clipped `<select>` text |
+| `web/src/components/Chat/MessageList.tsx` | stay pinned to the bottom on resize | keyboard opening / composer growing hid the newest message |
+| `web/src/components/Chat/{Assistant,Streaming,User}Message.tsx` | avatar `hidden md:flex` | gives phones back 40px of every line |
 
 **`nerve/config.py`** — three insertions:
 1. `class SignalConfig` immediately **before** `class TelegramConfig`
