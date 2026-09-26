@@ -207,7 +207,13 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    // scrollHeight excludes the border but `height` (border-box) includes it,
+    // so setting height = scrollHeight left the content area 2px short. That
+    // made the box scroll by 2px and draw a scrollbar over its own right
+    // border — invisible where scrollbars overlay (macOS), a visible sliver
+    // and a clipped corner on iOS. Add the border back.
+    const border = el.offsetHeight - el.clientHeight;
+    el.style.height = Math.min(el.scrollHeight + border, 200) + 'px';
   }, [input]);
 
   // Esc anywhere dismisses the preview (cancels an in-flight rewrite).
@@ -845,13 +851,16 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
             }
             rows={1}
             disabled={disabled || rewriteActive}
-            // basis-full makes the textarea claim a whole flex line on its
-            // own; order-1 puts that line under the controls rather than
-            // above them. Both are undone at `md`, back to a single row.
+            // On phones the textarea takes its own line, under the controls
+            // (order-1) — but not the WHOLE line: its basis leaves room for
+            // Send (and Stop, while streaming), which are order-1 too, so
+            // they sit beside the message box where a thumb expects them
+            // rather than on the row above it. 3rem = one 40px button + gap.
+            // All of it is undone at `md`, back to a single row.
             // `text-sm` matches every other input in the app (`FIELD_SIZES.md`
             // is `text-sm` too). `text-base` — 16px — reads oversized next to
             // the transcript and fits noticeably less text on a line.
-            className="flex-1 basis-full order-1 md:basis-0 md:order-none px-4 py-3 bg-surface-raised border border-border rounded-xl text-sm text-text outline-none focus:border-accent/50 resize-none disabled:opacity-50 placeholder:text-text-faint"
+            className={`flex-1 ${isStreaming ? "basis-[calc(100%_-_6rem)]" : "basis-[calc(100%_-_3rem)]"} order-1 md:basis-0 md:order-none px-4 py-3 bg-surface-raised border border-border rounded-xl text-sm text-text outline-none focus:border-accent/50 resize-none disabled:opacity-50 placeholder:text-text-faint`}
           />
           {/* Run-later kebab — three-dots menu next to Send. Its submenu
               defers the composed prompt into a new session without spending
@@ -926,7 +935,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
             <button
               type="button"
               onClick={onStop}
-              className="w-10 h-10 bg-error-solid hover:bg-error-solid/90 text-white rounded-xl inline-flex items-center justify-center cursor-pointer transition-colors shrink-0"
+              className="order-1 md:order-none w-10 h-10 bg-error-solid hover:bg-error-solid/90 text-white rounded-xl inline-flex items-center justify-center cursor-pointer transition-colors shrink-0"
               title="Stop generation"
               aria-label="Stop generation"
             >
@@ -939,6 +948,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
             label={isStreaming ? 'Queue message' : 'Send'}
             variant="primary"
             size="md"
+            className="order-1 md:order-none"
             onClick={handleSend}
             disabled={!canSend}
           >

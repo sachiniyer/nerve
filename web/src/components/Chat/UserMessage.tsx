@@ -24,7 +24,7 @@ export function UserMessage({ message, actions }: {
       <div className="max-w-[var(--chat-width)] mx-auto relative">
         {actions}
         <div className="flex gap-3">
-          <div className="w-7 h-7 rounded-full bg-surface-raised flex items-center justify-center text-xs font-medium text-text-muted shrink-0 mt-0.5">
+          <div className="w-7 h-7 rounded-full bg-surface-raised hidden md:flex items-center justify-center text-xs font-medium text-text-muted shrink-0 mt-0.5">
             U
           </div>
           <div className="min-w-0 flex-1">

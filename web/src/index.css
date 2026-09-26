@@ -740,3 +740,35 @@ body {
     animation: none;
   }
 }
+
+
+/* ------------------------------------------------------------ phone fixes --
+   Desktop is untouched: every rule below is scoped to small or touch screens.
+
+   1. iOS Safari zooms the whole page when you focus any field whose text is
+      under 16px, and leaves it zoomed. The composer is 14px by design (see
+      the comment on its textarea), so every tap into it zoomed the app.
+      16px on touch screens only keeps the desktop look. Unlayered on purpose:
+      it has to beat the `text-sm` utility, and unlayered CSS outranks every
+      @layer regardless of specificity.
+   2. A markdown table wider than the phone — the agent's inbox digests are
+      the usual one — pushed the ENTIRE conversation sideways, so everything
+      scrolled horizontally. The table now scrolls inside itself instead.
+   3. Long unbroken strings (URLs, paths, tokens) wrap instead of overflowing.
+*/
+@media (pointer: coarse) {
+  input, textarea, select { font-size: 16px; }
+  /* iOS draws a native <select>'s text inside its vertical padding and clips
+     the descenders at a fixed height (the composer's model picker showed
+     "claude-opus-5" cut off). With no vertical padding WebKit centres the
+     text in the box itself. Heights come from the h-* utilities, unchanged. */
+  select { padding-top: 0; padding-bottom: 0; }
+}
+@media (max-width: 767px) {
+  .markdown-content table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+.markdown-content { overflow-wrap: break-word; }

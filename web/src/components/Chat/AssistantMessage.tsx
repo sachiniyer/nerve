@@ -30,7 +30,7 @@ export function AssistantMessage({ message, actions }: {
       <div className="max-w-[var(--chat-width)] mx-auto relative">
         {actions}
         <div className="flex gap-3">
-          <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium shrink-0 mt-0.5 bg-accent/20 text-accent">
+          <div className="w-7 h-7 rounded-full hidden md:flex items-center justify-center text-xs font-medium shrink-0 mt-0.5 bg-accent/20 text-accent">
             N
           </div>
           <div className="min-w-0 flex-1">
