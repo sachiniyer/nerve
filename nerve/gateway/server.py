@@ -611,6 +611,33 @@ async def lifespan(app: FastAPI):
                 startup_cleanups.append(("Telegram bot", telegram_channel.stop))
                 logger.info("Telegram bot started")
 
+        # Start Signal channel if enabled. Guarded like Telegram above: the
+        # sidecar being down must not take the gateway with it.
+        signal_channel = None
+        if config.signal.enabled and config.signal.number:
+            from nerve.channels.signal import SignalChannel
+            # get_config, not the object read above: the channel resolves config
+            # per message so a reload reaches the allowlist check.
+            channel = SignalChannel(get_config, _engine.router)
+            try:
+                await channel.start()
+            except Exception as exc:  # noqa: BLE001 — a channel must never take the gateway down
+                text = f"{type(exc).__name__}: {exc}"
+                logger.error("[ERR] Signal channel failed to start: %s", text)
+                try:
+                    setup_state.record_boot_error("signal", text)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Could not record the Signal start failure: %s", e)
+                try:
+                    await channel.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                signal_channel = channel
+                _engine.register_channel(signal_channel)
+                startup_cleanups.append(("Signal channel", signal_channel.stop))
+                logger.info("Signal channel started")
+
         # Install the lifecycle owner even when Slack starts disabled, so a later
         # reload can enable it without rebuilding gateway state.
         from nerve.channels.slack_runtime import SlackRuntime
@@ -1057,6 +1084,8 @@ async def lifespan(app: FastAPI):
         _hosted_channels = None
     if telegram_channel:
         await telegram_channel.stop()
+    if signal_channel:
+        await signal_channel.stop()
     await slack_runtime.shutdown()
     if ws_sync_task:
         # Exit through the loop's own stop path rather than cancelling it where
@@ -1564,6 +1593,26 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok", "version": "0.1.0", "generation": _boot.boot_id()}
+
+    # FORK PATCH — lets the out-of-pod deployer avoid restarting mid-turn.
+    #
+    # The deployment uses `strategy: Recreate`, so every rollout kills the
+    # running turn. The nerve-deployer CronJob polls this before it patches
+    # the image and waits while anything is running — including a turn that
+    # is blocked on an AskUserQuestion, which counts as running. Unauthenticated
+    # like /health, and it exposes only a count. See k3s-configs/nerve.
+    #
+    # Upstream's "running" covers the orchestrator's turn only; background
+    # sub-agents live in the agent registry and keep working after the turn
+    # ends. A restart kills them too, so they count as one more.
+    @app.get("/health/activity", include_in_schema=False)
+    async def health_activity():
+        if not _engine:
+            return {"running": 0}
+        running = len(_engine.sessions.get_running_ids())
+        if _engine.agents.any_live():
+            running += 1
+        return {"running": running}
 
     # Favicon from the tracked config subtree (see config.workspace_favicon).
     # No auth: a browser asks for this before anyone has logged in, so requiring

@@ -1531,6 +1531,61 @@ class ChannelSourceConfig:
 
 
 @dataclass
+class SignalConfig:
+    """Signal via a signal-cli-rest-api sidecar.
+
+    Defaults to OFF. Unlike Telegram there is no "open" policy: a Signal
+    message becomes a tool call on this host, so senders are allowlisted or
+    nothing is answered. An empty allowlist rejects everyone — the fail-safe
+    direction is closed, and it is checked per message rather than at startup
+    so a reload cannot silently widen access.
+    """
+
+    enabled: bool = False
+    # The linked account's own number, E.164. This is the account the sidecar
+    # is linked to, not the person being replied to.
+    number: str = ""
+    # Sidecar base URL. Localhost because it is a sidecar in the same pod;
+    # there is no auth on this API, so it must never be exposed.
+    api_url: str = "http://127.0.0.1:8080"
+    # E.164 numbers permitted to talk to the agent.
+    allowed_numbers: list[str] = field(default_factory=list)
+    # E.164 numbers the agent may SEND to, beyond the account's own number.
+    #
+    # Separate from allowed_numbers on purpose, and empty by default: reading
+    # a conversation and being able to write into it are different powers, and
+    # conflating them is how an agent ends up texting someone's partner. Note
+    # to Self always works without being listed. Adding a number here IS the
+    # approval step — it is a deliberate config change, reviewed in git.
+    outbound_allowed_numbers: list[str] = field(default_factory=list)
+
+    @classmethod
+    @_coerced
+    def from_dict(cls, d: dict) -> SignalConfig:
+        # Raw values in, upstream's coercion out — the same helpers every
+        # other config class uses. An earlier version hand-rolled this with
+        # bool(), which reads the string "false" as True: a ${VAR} reference
+        # set to "false" would have switched the channel ON. And list() on a
+        # bare string splits it into characters. `_str_list` hands a non-list
+        # to @_coerced, which wraps it as one element — so a single number
+        # given as a string means that one number, as a ${VAR} on a list
+        # field should.
+        enabled = _as_bool(d.get("enabled", False), False, label="SignalConfig.enabled")
+        if enabled and not d.get("number"):
+            logger.warning("signal.enabled is true but signal.number is unset — "
+                           "the channel cannot start")
+        return cls(
+            enabled=enabled,
+            number=str(d.get("number", "")),
+            api_url=str(d.get("api_url", "http://127.0.0.1:8080")),
+            allowed_numbers=_str_list(d.get("allowed_numbers") or [], clean=True),
+            outbound_allowed_numbers=_str_list(
+                d.get("outbound_allowed_numbers") or [], clean=True,
+            ),
+        )
+
+
+@dataclass
 class TelegramConfig:
     enabled: bool = True
     bot_token: str = ""
@@ -3770,6 +3825,7 @@ class NerveConfig:
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    signal: SignalConfig = field(default_factory=SignalConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
     sync: SyncConfig = field(default_factory=SyncConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -4183,6 +4239,7 @@ class NerveConfig:
             gateway=GatewayConfig.from_dict(d.get("gateway", {})),
             agent=AgentConfig.from_dict(d.get("agent", {})),
             telegram=TelegramConfig.from_dict(d.get("telegram", {}), locked=locked),
+            signal=SignalConfig.from_dict(d.get("signal", {})),
             slack=SlackConfig.from_dict(d.get("slack", {}), locked=locked),
             sync=SyncConfig.from_dict(d.get("sync", {})),
             memory=MemoryConfig.from_dict(d.get("memory", {})),
