@@ -15,6 +15,27 @@
     <!-- Served from the workspace config subtree when a favicon is tracked
          there, 404 otherwise. Not a bundled asset: it is per-instance config. -->
     <link rel="icon" href="/favicon.ico" />
+
+    <!-- ---------------------------------------------------------------- PWA
+         Nerve is installable to a home screen. The files below live in
+         web/public/ and Vite copies them into dist/ verbatim; the gateway's
+         SPA catch-all serves anything that exists as a real file, so they are
+         reachable at the root without a new route.
+
+         Note that nerve.sachiniyer.com is mesh-only. An installed copy opens
+         only while the device is on the tailnet — off it, the launch is a
+         connection failure, not an offline mode. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- iOS ignores the manifest's icons entirely and uses this one, which it
+         rounds itself — so it is square and opaque. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Nerve" />
+    <!-- black-translucent is what puts content under the status bar, which is
+         the point of the viewport-fit=cover and safe-area padding above. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#1f1f1c" />
     <title>Nerve</title>
     <!-- Pre-paint theme stamp. Must mirror themeStore's getInitialPreference()
          and resolve() exactly, or the first frame disagrees with the app.
@@ -43,9 +64,54 @@
         document.documentElement.setAttribute('data-cui-theme', resolved);
       })();
     </script>
+    <!-- Keep the browser/OS chrome colour in step with the app's own theme.
+         Separate from the block above on purpose: that one is upstream's and
+         mirrors themeStore, and this fork tries not to touch upstream lines.
+         It reads the attribute that block just set, so order matters. -->
+    <script>
+      (function () {
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (!meta) return;
+        function sync() {
+          var t = document.documentElement.getAttribute('data-cui-theme');
+          meta.setAttribute('content', t === 'light' ? '#ffffff' : '#1f1f1c');
+        }
+        sync();
+        // themeStore flips the attribute when the theme changes at runtime.
+        new MutationObserver(sync).observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ['data-cui-theme'],
+        });
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- Service worker. Required for Chrome to offer an install, and it makes
+         a cold launch from the home screen instant. See web/public/sw.js for
+         what it does and does not cache — it is not an offline mode. -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        // Whether a controller exists BEFORE registering tells us if this is a
+        // first install or an update. Only an update warrants a reload; doing
+        // it on first install is a pointless flash, and doing it unguarded is
+        // the classic service-worker reload loop.
+        var hadController = !!navigator.serviceWorker.controller;
+        var reloading = false;
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          if (!hadController || reloading) return;
+          reloading = true;
+          window.location.reload();
+        });
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js').catch(function (e) {
+            // Non-fatal by design: the app works fine unregistered. This fails
+            // on plain http, which is every local `vite dev` on a LAN address.
+            console.warn('service worker registration failed', e);
+          });
+        });
+      }
+    </script>
   </body>
 </html>
