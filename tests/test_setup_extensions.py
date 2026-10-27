@@ -122,10 +122,13 @@ class TestClaudeBackendEnv:
         assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-REPLACE"
         assert "ANTHROPIC_API_KEY" not in env
 
-    def test_api_key_wins_over_oauth_token(self):
+    def test_oauth_token_wins_over_api_key(self):
+        # FORK PATCH — upstream asserts the API key wins. This fork refuses the
+        # key whenever a subscription token exists (billing; see REBASE.md and
+        # tests/test_fork_patches.py), so the assertion is inverted here.
         env = _backend(api_key="sk-ant-REPLACE0000000000", oauth="sk-ant-oat01-REPLACE")._build_env()
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-REPLACE0000000000"
-        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-REPLACE"
+        assert "ANTHROPIC_API_KEY" not in env
 
     def test_nothing_is_exported_without_either(self):
         env = _backend()._build_env()
