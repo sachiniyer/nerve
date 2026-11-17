@@ -8,7 +8,7 @@ export function StreamingMessage() {
       <div className="py-4 px-5 msg-assistant">
         <div className="max-w-[var(--chat-width)] mx-auto">
           <div className="flex gap-3">
-            <div className="w-7 h-7 rounded-full bg-accent/20 flex items-center justify-center text-xs font-medium text-accent shrink-0">
+            <div className="w-7 h-7 rounded-full bg-accent/20 hidden md:flex items-center justify-center text-xs font-medium text-accent shrink-0">
               N
             </div>
             <div className="pt-1.5">
@@ -24,7 +24,7 @@ export function StreamingMessage() {
     <div className="py-4 px-5 bg-bg-sunken">
       <div className="max-w-[var(--chat-width)] mx-auto">
         <div className="flex gap-3">
-          <div className="w-7 h-7 rounded-full bg-accent/20 flex items-center justify-center text-xs font-medium text-accent shrink-0 mt-0.5">
+          <div className="w-7 h-7 rounded-full bg-accent/20 hidden md:flex items-center justify-center text-xs font-medium text-accent shrink-0 mt-0.5">
             N
           </div>
           <div className="min-w-0 flex-1">
